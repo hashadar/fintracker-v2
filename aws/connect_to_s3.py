@@ -3,6 +3,7 @@ import pandas as pd
 import io
 import os
 from typing import List
+import json
 
 # Import secrets
 try:
@@ -73,6 +74,29 @@ class S3Helper:
             return pd.read_csv(local_path, **pandas_kwargs)
         except Exception as e:
             raise RuntimeError(f"Error downloading CSV from S3: {str(e)}")
+
+    def download_file_from_s3(self, key: str, local_path: str):
+        """Download any file from S3 to local path."""
+        try:
+            # Create directory if it doesn't exist
+            directory = os.path.dirname(local_path)
+            if directory:  # Only create directory if path is not empty
+                os.makedirs(directory, exist_ok=True)
+            self.s3_client.download_file(self.bucket_name, key, local_path)
+        except Exception as e:
+            raise RuntimeError(f"Error downloading file from S3: {str(e)}")
+
+    def read_json_from_s3(self, file_key):
+        """Read a JSON file from S3."""
+        try:
+            obj = self.s3_client.get_object(Bucket=self.bucket_name, Key=file_key)
+            return json.loads(obj["Body"].read().decode("utf-8"))
+        except self.s3_client.exceptions.NoSuchKey:
+            print(f"File not found: s3://{self.bucket_name}/{file_key}")
+            return None
+        except Exception as e:
+            print(f"Error reading JSON from s3://{self.bucket_name}/{file_key}: {e}")
+            raise
 
     def upload_csv_to_s3(
         self, df: pd.DataFrame, key: str, index: bool = False, **pandas_kwargs

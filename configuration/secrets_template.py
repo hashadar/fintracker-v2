@@ -30,3 +30,7 @@ GCP_SERVICE_ACCOUNT_INFO = {
     "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
     "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/your-service-account-email%40your-project-id.iam.gserviceaccount.com",
 }
+
+# Coinbase Advanced API Credentials
+COINBASE_API_KEY = "your_coinbase_api_key"
+COINBASE_API_SECRET = "your_coinbase_api_secret"
