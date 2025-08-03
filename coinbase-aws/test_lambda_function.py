@@ -19,7 +19,7 @@ def lambda_handler(event, context):
             'event_data': event
         }
         
-        print(f"Test function executed successfully in {environment} environment")
+        print(f"Test function executed successfully in {environment} environment - updated")
         
         return {
             'statusCode': 200,
