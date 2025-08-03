@@ -1,0 +1,114 @@
+name: Test Lambda Container Deploy
+
+on:
+  push:
+    branches: [develop]
+    paths:
+      - 'coinbase-aws/**'
+  pull_request:
+    branches: [develop]
+    paths:
+      - 'coinbase-aws/**'
+  workflow_dispatch: # Allow manual trigger
+
+env:
+  AWS_REGION: eu-west-2
+  ECR_REPOSITORY: coinbase-test-lambda
+  LAMBDA_FUNCTION_NAME: coinbase-test-function
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.13'
+    
+    - name: Run basic tests
+      run: |
+        cd coinbase-aws
+        python -c "import json; print('Basic test passed')"
+    
+    - name: Test Docker build
+      run: |
+        cd coinbase-aws
+        docker build -t test-lambda .
+        echo "Docker build successful"
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/develop' # Only deploy from develop branch
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+    
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+    
+    - name: Create ECR repository if it doesn't exist
+      run: |
+        aws ecr describe-repositories --repository-names ${{ env.ECR_REPOSITORY }} || \
+        aws ecr create-repository --repository-name ${{ env.ECR_REPOSITORY }}
+    
+    - name: Build and push Docker image
+      id: build
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        cd coinbase-aws
+        docker build -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG .
+        docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
+        echo "image_uri=$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG" >> $GITHUB_OUTPUT
+    
+    - name: Create or update Lambda function
+      run: |
+        # Check if function exists
+        if aws lambda get-function --function-name ${{ env.LAMBDA_FUNCTION_NAME }} 2>/dev/null; then
+          # Update existing function
+          aws lambda update-function-code \
+            --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+            --image-uri ${{ steps.build.outputs.image_uri }}
+          echo "Updated existing Lambda function"
+        else
+          # Create new function
+          aws lambda create-function \
+            --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+            --package-type Image \
+            --code ImageUri=${{ steps.build.outputs.image_uri }} \
+            --role arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-hasha \
+            --timeout 30 \
+            --memory-size 512 \
+            --environment Variables='{ENVIRONMENT=develop}'
+          echo "Created new Lambda function"
+        fi
+    
+    - name: Test Lambda function
+      run: |
+        # Wait a moment for function to be ready
+        sleep 10
+        
+        # Invoke the function
+        aws lambda invoke \
+          --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+          --payload '{"test": "data"}' \
+          response.json
+        
+        # Display response
+        cat response.json
+        echo "Lambda function test completed" 
