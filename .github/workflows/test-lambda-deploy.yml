@@ -91,7 +91,7 @@ jobs:
             --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
             --package-type Image \
             --code ImageUri=${{ steps.build.outputs.image_uri }} \
-            --role arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-actions-hasha \
+            --role arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/lambda-execution-role-fintracker-v2 \
             --timeout 30 \
             --memory-size 512 \
             --environment Variables='{ENVIRONMENT=develop}'
