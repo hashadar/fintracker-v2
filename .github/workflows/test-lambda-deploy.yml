@@ -111,4 +111,4 @@ jobs:
         
         # Display response
         cat response.json
-        echo "Lambda function test completed" 
+        echo "Lambda function test completed successfully" 
