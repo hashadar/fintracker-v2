@@ -170,27 +170,49 @@ jobs:
         echo "Waiting for function to be ready..."
         sleep 15
         
-        # Create test payload file to avoid encoding issues
-        cat > test-payload.json << 'EOF'
-        {"test": "data"}
-        EOF
+        # Test approach 1: printf method
+        echo "Testing approach 1: printf method..."
+        printf '{"test":"data"}' > test-payload.json
         
-        # Test the function
-        echo "Invoking Lambda function..."
-        aws lambda invoke \
+        if aws lambda invoke \
           --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
           --payload file://test-payload.json \
           --region ${{ env.AWS_REGION }} \
-          response.json
-        
-        # Display response
-        echo "Lambda function response:"
-        cat response.json
-        
-        # Check if the function executed successfully
-        if grep -q '"statusCode": 200' response.json; then
-          echo "✅ Lambda function test completed successfully"
+          response1.json 2>/dev/null; then
+          echo "✅ Approach 1 (printf) worked!"
+          echo "Lambda function response:"
+          cat response1.json
+          if grep -q '"statusCode": 200' response1.json; then
+            echo "✅ Lambda function test completed successfully with printf method"
+            exit 0
+          else
+            echo "❌ Lambda function returned non-200 status code"
+          fi
         else
-          echo "❌ Lambda function test failed"
-          exit 1
-        fi 
+          echo "❌ Approach 1 (printf) failed with encoding error"
+        fi
+        
+        # Test approach 2: base64 method
+        echo "Testing approach 2: base64 method..."
+        echo '{"test":"data"}' | base64 > test-payload.b64
+        
+        if aws lambda invoke \
+          --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+          --payload file://test-payload.b64 \
+          --region ${{ env.AWS_REGION }} \
+          response2.json 2>/dev/null; then
+          echo "✅ Approach 2 (base64) worked!"
+          echo "Lambda function response:"
+          cat response2.json
+          if grep -q '"statusCode": 200' response2.json; then
+            echo "✅ Lambda function test completed successfully with base64 method"
+            exit 0
+          else
+            echo "❌ Lambda function returned non-200 status code"
+          fi
+        else
+          echo "❌ Approach 2 (base64) also failed"
+        fi
+        
+        echo "❌ Both approaches failed - Lambda function test failed"
+        exit 1 

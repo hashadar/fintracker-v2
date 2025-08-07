@@ -4,7 +4,7 @@ from datetime import datetime
 
 def lambda_handler(event, context):
     """
-    Test Lambda function to verify container deployment works.
+    Test Lambda function to verify container deployment works properly.
     """
     try:
         # Get environment variable
