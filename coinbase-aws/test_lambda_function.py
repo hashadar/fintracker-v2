@@ -15,7 +15,7 @@ def lambda_handler(event, context):
             'message': 'Hello from Lambda Container!',
             'environment': environment,
             'timestamp': datetime.now().isoformat(),
-            'lambda_request_id': context.request_id,
+            'lambda_request_id': context.aws_request_id,
             'event_data': event
         }
         
