@@ -174,7 +174,7 @@ jobs:
         echo "Invoking Lambda function..."
         aws lambda invoke \
           --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
-          --payload '{"test": "data"}' \
+          --payload ' { "test": "data" } ' \
           --region ${{ env.AWS_REGION }} \
           response.json
         
