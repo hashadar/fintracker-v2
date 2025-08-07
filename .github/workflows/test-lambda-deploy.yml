@@ -84,7 +84,95 @@ jobs:
         docker build -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG .
         docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
         echo "image_uri=$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG" >> $GITHUB_OUTPUT
-    
+
+    - name: Debug IAM Role Permissions
+      run: |
+        echo "=== Debugging IAM Role Permissions ==="
+        echo "Checking if IAM role exists..."
+        if aws iam get-role --role-name lambda-execution-role-fintracker-v2 2>/dev/null; then
+          echo "✅ IAM role lambda-execution-role-fintracker-v2 exists"
+          
+          echo "Checking attached policies..."
+          aws iam list-attached-role-policies --role-name lambda-execution-role-fintracker-v2 || echo "No attached policies found"
+          
+          echo "Checking inline policies..."
+          aws iam list-role-policies --role-name lambda-execution-role-fintracker-v2 || echo "No inline policies found"
+          
+          echo "Getting role details..."
+          aws iam get-role --role-name lambda-execution-role-fintracker-v2 --query 'Role.AssumeRolePolicyDocument' --output json
+        else
+          echo "❌ IAM role lambda-execution-role-fintracker-v2 does not exist"
+        fi
+
+    - name: Debug ECR Access
+      run: |
+        echo "=== Debugging ECR Access ==="
+        echo "Checking ECR repository..."
+        aws ecr describe-repositories --repository-names ${{ env.ECR_REPOSITORY }} --region ${{ env.AWS_REGION }}
+        
+        echo "Checking ECR images..."
+        aws ecr describe-images --repository-name ${{ env.ECR_REPOSITORY }} --region ${{ env.AWS_REGION }} --query 'imageDetails[0:3]' --output table
+        
+        echo "Testing ECR authorization..."
+        aws ecr get-authorization-token --region ${{ env.AWS_REGION }} --query 'authorizationData[0].authorizationToken' --output text | base64 -d || echo "Failed to get ECR authorization token"
+        
+        echo "Testing ECR image access (simulating Lambda access)..."
+        IMAGE_URI="${{ steps.build.outputs.image_uri }}"
+        echo "Testing access to image: $IMAGE_URI"
+        
+        # Test if we can describe the image (simulates Lambda's access)
+        REPO_NAME=$(echo $IMAGE_URI | cut -d'/' -f2 | cut -d':' -f1)
+        IMAGE_TAG=$(echo $IMAGE_URI | cut -d':' -f2)
+        echo "Repository: $REPO_NAME, Tag: $IMAGE_TAG"
+        
+        aws ecr batch-get-image \
+          --repository-name $REPO_NAME \
+          --image-ids imageTag=$IMAGE_TAG \
+          --region ${{ env.AWS_REGION }} || echo "❌ Failed to access ECR image - this is likely the issue!"
+
+    - name: Debug IAM Role ECR Permissions
+      run: |
+        echo "=== Debugging IAM Role ECR Permissions ==="
+        ROLE_ARN="arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/lambda-execution-role-fintracker-v2"
+        echo "Checking permissions for role: $ROLE_ARN"
+        
+        # Check if role can be assumed by Lambda
+        echo "Checking trust relationship..."
+        aws iam get-role --role-name lambda-execution-role-fintracker-v2 --query 'Role.AssumeRolePolicyDocument' --output json
+        
+        # Check ECR permissions specifically
+        echo "Checking ECR permissions in role policies..."
+        
+        # Check attached policies
+        ATTACHED_POLICIES=$(aws iam list-attached-role-policies --role-name lambda-execution-role-fintracker-v2 --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null || echo "")
+        if [ ! -z "$ATTACHED_POLICIES" ]; then
+          echo "Attached policies: $ATTACHED_POLICIES"
+          for policy in $ATTACHED_POLICIES; do
+            echo "Checking policy: $policy"
+            aws iam get-policy-version --policy-arn $policy --version-id $(aws iam get-policy --policy-arn $policy --query 'Policy.DefaultVersionId' --output text) --query 'PolicyVersion.Document.Statement[?contains(Action[], `ecr`)]' --output json 2>/dev/null || echo "No ECR permissions found in $policy"
+          done
+        fi
+        
+        # Check inline policies
+        INLINE_POLICIES=$(aws iam list-role-policies --role-name lambda-execution-role-fintracker-v2 --query 'PolicyNames[]' --output text 2>/dev/null || echo "")
+        if [ ! -z "$INLINE_POLICIES" ]; then
+          echo "Inline policies: $INLINE_POLICIES"
+          for policy in $INLINE_POLICIES; do
+            echo "Checking inline policy: $policy"
+            aws iam get-role-policy --role-name lambda-execution-role-fintracker-v2 --policy-name $policy --query 'PolicyDocument.Statement[?contains(Action[], `ecr`)]' --output json 2>/dev/null || echo "No ECR permissions found in $policy"
+          done
+        fi
+
+    - name: Debug Lambda Function Status
+      run: |
+        echo "=== Debugging Lambda Function Status ==="
+        if aws lambda get-function --function-name ${{ env.LAMBDA_FUNCTION_NAME }} --region ${{ env.AWS_REGION }} 2>/dev/null; then
+          echo "✅ Lambda function ${{ env.LAMBDA_FUNCTION_NAME }} exists"
+          aws lambda get-function --function-name ${{ env.LAMBDA_FUNCTION_NAME }} --region ${{ env.AWS_REGION }} --query 'Configuration.{FunctionName:FunctionName,Runtime:Runtime,Role:Role,CodeSize:CodeSize}' --output table
+        else
+          echo "❌ Lambda function ${{ env.LAMBDA_FUNCTION_NAME }} does not exist"
+        fi
+
     - name: Create or update Lambda function
       run: |
         # Check if function exists
