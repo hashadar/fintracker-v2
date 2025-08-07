@@ -1,6 +1,6 @@
 """
 Coinbase Daily Data Extractor - Lambda Function
-Extracts daily portfolio summary, market data, and hourly price data for the last 24 hours.
+Extracts daily portfolio summary, market data and hourly price data for the last 24 hours.
 Runs daily at 2am UTC.
 """
 

@@ -106,6 +106,7 @@ Automated daily extraction of Coinbase portfolio data, market information, and h
            "lambda:CreateFunction",
            "lambda:UpdateFunctionCode",
            "lambda:UpdateFunctionConfiguration",
+           "lambda:GetFunctionConfiguration",
            "lambda:InvokeFunction",
            "lambda:GetFunction",
            "lambda:AddPermission",
