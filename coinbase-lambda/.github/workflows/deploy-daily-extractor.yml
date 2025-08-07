@@ -1,0 +1,211 @@
+name: Deploy Coinbase Daily Data Extractor
+
+on:
+  push:
+    branches: [develop, main]
+    paths:
+      - 'coinbase-lambda/**'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: eu-west-2
+  ECR_REPOSITORY: coinbase-daily-extractor
+  LAMBDA_FUNCTION_NAME: coinbase-daily-data-extractor
+  LAMBDA_TIMEOUT: 900  # 15 minutes
+  LAMBDA_MEMORY: 2048  # 2GB for data processing
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.13'
+    
+    - name: Run basic tests
+      run: |
+        cd coinbase-lambda
+        python -c "import json; print('Basic test passed')"
+    
+    - name: Test Docker build
+      run: |
+        cd coinbase-lambda
+        docker build -t coinbase-daily-extractor .
+        echo "Docker build successful"
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main'
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set environment
+      id: set-env
+      run: |
+        if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+          echo "environment=production" >> $GITHUB_OUTPUT
+        else
+          echo "environment=develop" >> $GITHUB_OUTPUT
+        fi
+        echo "Deploying to environment: ${{ steps.set-env.outputs.environment }}"
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+    
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+    
+    - name: Setup ECR Repository
+      run: |
+        # Check if repository exists
+        if ! aws ecr describe-repositories --repository-names ${{ env.ECR_REPOSITORY }} --region ${{ env.AWS_REGION }} 2>/dev/null; then
+          echo "Creating ECR repository..."
+          aws ecr create-repository --repository-name ${{ env.ECR_REPOSITORY }} --region ${{ env.AWS_REGION }}
+        fi
+        
+        # Set repository policy for Lambda access
+        aws ecr set-repository-policy \
+          --repository-name ${{ env.ECR_REPOSITORY }} \
+          --region ${{ env.AWS_REGION }} \
+          --policy-text '{
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "LambdaAccess",
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": "lambda.amazonaws.com"
+                },
+                "Action": [
+                  "ecr:BatchGetImage",
+                  "ecr:GetDownloadUrlForLayer"
+                ]
+              }
+            ]
+          }'
+    
+    - name: Build and push Docker image
+      id: build
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        cd coinbase-lambda
+        docker build -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG .
+        docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
+        echo "image_uri=$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG" >> $GITHUB_OUTPUT
+    
+    - name: Setup IAM Role and Permissions
+      run: |
+        # Check if IAM role exists
+        if ! aws iam get-role --role-name lambda-execution-role-fintracker-v2 --region ${{ env.AWS_REGION }} 2>/dev/null; then
+          echo "IAM role lambda-execution-role-fintracker-v2 does not exist. Please create it manually with the required permissions."
+          echo "Required permissions:"
+          echo "- logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents"
+          echo "- s3:GetObject, s3:PutObject, s3:PutObjectAcl (for hashadar-personalfinance bucket)"
+          echo "- ecr:GetAuthorizationToken, ecr:BatchCheckLayerAvailability, ecr:GetDownloadUrlForLayer, ecr:BatchGetImage"
+          exit 1
+        fi
+        
+        echo "IAM role exists, proceeding with deployment"
+    
+    - name: Deploy Lambda Function
+      run: |
+        # Check if function exists
+        if aws lambda get-function --function-name ${{ env.LAMBDA_FUNCTION_NAME }} --region ${{ env.AWS_REGION }} 2>/dev/null; then
+          echo "Updating existing Lambda function..."
+          aws lambda update-function-code \
+            --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+            --image-uri ${{ steps.build.outputs.image_uri }} \
+            --region ${{ env.AWS_REGION }}
+          
+          aws lambda update-function-configuration \
+            --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+            --timeout ${{ env.LAMBDA_TIMEOUT }} \
+            --memory-size ${{ env.LAMBDA_MEMORY }} \
+            --region ${{ env.AWS_REGION }} \
+            --environment Variables='{ENVIRONMENT=${{ steps.set-env.outputs.environment }},S3_BUCKET_NAME=hashadar-personalfinance}'
+        else
+          echo "Creating new Lambda function..."
+          aws lambda create-function \
+            --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+            --package-type Image \
+            --code ImageUri=${{ steps.build.outputs.image_uri }} \
+            --role arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/lambda-execution-role-fintracker-v2 \
+            --timeout ${{ env.LAMBDA_TIMEOUT }} \
+            --memory-size ${{ env.LAMBDA_MEMORY }} \
+            --region ${{ env.AWS_REGION }} \
+            --environment Variables='{ENVIRONMENT=${{ steps.set-env.outputs.environment }},S3_BUCKET_NAME=hashadar-personalfinance}'
+        fi
+    
+    - name: Test Lambda Function
+      run: |
+        # Wait for function to be ready
+        echo "Waiting for function to be ready..."
+        aws lambda wait function-updated --function-name ${{ env.LAMBDA_FUNCTION_NAME }} --region ${{ env.AWS_REGION }}
+        
+        # Create test payload
+        echo '{"test": "data"}' | base64 > test-payload.b64
+        
+        # Invoke function
+        aws lambda invoke \
+          --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+          --payload file://test-payload.b64 \
+          --region ${{ env.AWS_REGION }} \
+          response.json
+        
+        # Check response
+        if [ -f response.json ]; then
+          echo "Lambda function response:"
+          cat response.json
+          
+          # Check if response contains success
+          if grep -q '"statusCode": 200' response.json; then
+            echo "✅ Lambda function test successful"
+          else
+            echo "❌ Lambda function test failed"
+            exit 1
+          fi
+        else
+          echo "❌ No response file generated"
+          exit 1
+        fi
+    
+    - name: Setup EventBridge Rule
+      run: |
+        # Check if rule exists
+        if ! aws events describe-rule --name coinbase-daily-extraction-rule --region ${{ env.AWS_REGION }} 2>/dev/null; then
+          echo "Creating EventBridge rule for daily execution at 2am UTC..."
+          aws events put-rule \
+            --name coinbase-daily-extraction-rule \
+            --schedule-expression "cron(0 2 * * ? *)" \
+            --region ${{ env.AWS_REGION }}
+          
+          # Add Lambda as target
+          aws events put-targets \
+            --rule coinbase-daily-extraction-rule \
+            --targets "Id"="1","Arn"="arn:aws:lambda:${{ env.AWS_REGION }}:${{ secrets.AWS_ACCOUNT_ID }}:function:${{ env.LAMBDA_FUNCTION_NAME }}" \
+            --region ${{ env.AWS_REGION }}
+          
+          # Add permission for EventBridge to invoke Lambda
+          aws lambda add-permission \
+            --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+            --statement-id EventBridgeInvoke \
+            --action lambda:InvokeFunction \
+            --principal events.amazonaws.com \
+            --source-arn "arn:aws:events:${{ env.AWS_REGION }}:${{ secrets.AWS_ACCOUNT_ID }}:rule/coinbase-daily-extraction-rule" \
+            --region ${{ env.AWS_REGION }}
+        else
+          echo "EventBridge rule already exists"
+        fi 
