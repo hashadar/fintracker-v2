@@ -11,9 +11,6 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import boto3
 
-# Add parent directory to path for imports
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from coinbase.rest import RESTClient
 
 
