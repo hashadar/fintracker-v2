@@ -20,6 +20,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 2  # Need at least 2 commits for change detection
     
     - name: Set up Python
       uses: actions/setup-python@v4
@@ -44,6 +46,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 2  # Need at least 2 commits for change detection
     
     - name: Set environment
       id: set-env
@@ -54,6 +58,39 @@ jobs:
           echo "environment=develop" >> $GITHUB_OUTPUT
         fi
         echo "Deploying to environment: ${{ steps.set-env.outputs.environment }}"
+    
+    - name: Check for changes
+      id: changes
+      run: |
+        # Check what files changed in coinbase-lambda/ directory
+        # For first deployment or workflow_dispatch, assume everything changed
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$(git rev-list --count HEAD)" -eq 1 ]; then
+          echo "First deployment or manual trigger - assuming all changes"
+          echo "requirements_changed=true" >> $GITHUB_OUTPUT
+          echo "function_changed=true" >> $GITHUB_OUTPUT
+        else
+          # Get changed files in coinbase-lambda/ directory
+          CHANGED_FILES=$(git diff --name-only HEAD~1 | grep "^coinbase-lambda/" || true)
+          echo "Changed files in coinbase-lambda/: $CHANGED_FILES"
+          
+          # Check if requirements.txt changed
+          if echo "$CHANGED_FILES" | grep -q "requirements.txt"; then
+            echo "requirements_changed=true" >> $GITHUB_OUTPUT
+            echo "Requirements.txt changed - will rebuild Docker image"
+          else
+            echo "requirements_changed=false" >> $GITHUB_OUTPUT
+            echo "Requirements.txt unchanged - will skip Docker build if possible"
+          fi
+          
+          # Check if function code changed (Python files, Dockerfile, or any other code)
+          if echo "$CHANGED_FILES" | grep -q "\.py\|Dockerfile"; then
+            echo "function_changed=true" >> $GITHUB_OUTPUT
+            echo "Function code changed - will update Lambda function"
+          else
+            echo "function_changed=false" >> $GITHUB_OUTPUT
+            echo "Function code unchanged - will skip Lambda update"
+          fi
+        fi
     
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v4
@@ -95,16 +132,43 @@ jobs:
             ]
           }'
     
-    - name: Build and push Docker image
+    - name: Build and push Docker image (if needed)
       id: build
+      if: steps.changes.outputs.requirements_changed == 'true' || steps.changes.outputs.function_changed == 'true'
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         IMAGE_TAG: ${{ github.sha }}
       run: |
+        echo "Building and pushing Docker image..."
         cd coinbase-lambda
         docker build -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG .
         docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
         echo "image_uri=$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG" >> $GITHUB_OUTPUT
+        echo "✅ Docker image built and pushed successfully"
+    
+    - name: Set image URI
+      id: image-uri
+      run: |
+        if [ "${{ steps.changes.outputs.requirements_changed }}" = "true" ] || [ "${{ steps.changes.outputs.function_changed }}" = "true" ]; then
+          # Use newly built image
+          echo "image_uri=${{ steps.build.outputs.image_uri }}" >> $GITHUB_OUTPUT
+          echo "Using newly built image: ${{ steps.build.outputs.image_uri }}"
+        else
+          # Get the latest image URI from ECR
+          LATEST_IMAGE_URI=$(aws ecr describe-images \
+            --repository-name ${{ env.ECR_REPOSITORY }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'imageDetails[0].imageUri' \
+            --output text 2>/dev/null || echo "")
+          
+          if [ -n "$LATEST_IMAGE_URI" ]; then
+            echo "image_uri=$LATEST_IMAGE_URI" >> $GITHUB_OUTPUT
+            echo "Using existing image: $LATEST_IMAGE_URI"
+          else
+            echo "❌ No existing image found - this should not happen"
+            exit 1
+          fi
+        fi
     
     - name: Setup IAM Role and Permissions
       run: |
@@ -120,14 +184,15 @@ jobs:
         
         echo "IAM role exists, proceeding with deployment"
     
-    - name: Deploy Lambda Function
+    - name: Deploy Lambda Function (if needed)
+      if: steps.changes.outputs.function_changed == 'true'
       run: |
         # Check if function exists
         if aws lambda get-function --function-name ${{ env.LAMBDA_FUNCTION_NAME }} --region ${{ env.AWS_REGION }} 2>/dev/null; then
           echo "Updating existing Lambda function..."
           aws lambda update-function-code \
             --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
-            --image-uri ${{ steps.build.outputs.image_uri }} \
+            --image-uri "${{ steps.image-uri.outputs.image_uri }}" \
             --region ${{ env.AWS_REGION }}
           
           # Wait for function code update to complete
@@ -151,7 +216,7 @@ jobs:
           aws lambda create-function \
             --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
             --package-type Image \
-            --code ImageUri=${{ steps.build.outputs.image_uri }} \
+            --code ImageUri="${{ steps.image-uri.outputs.image_uri }}" \
             --role arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/lambda-execution-role-fintracker-v2 \
             --timeout ${{ env.LAMBDA_TIMEOUT }} \
             --memory-size ${{ env.LAMBDA_MEMORY }} \
@@ -162,6 +227,7 @@ jobs:
           echo "Waiting for function creation to complete..."
           aws lambda wait function-active --function-name ${{ env.LAMBDA_FUNCTION_NAME }} --region ${{ env.AWS_REGION }}
         fi
+        echo "✅ Lambda function updated successfully"
     
     - name: Test Lambda Function
       run: |
