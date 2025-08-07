@@ -60,19 +60,45 @@ jobs:
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v2
     
-    - name: Create ECR repository if it doesn't exist
+    - name: Setup ECR Repository
       run: |
-        echo "Checking if ECR repository ${{ env.ECR_REPOSITORY }} exists..."
+        echo "=== Setting up ECR Repository ==="
+        
+        # Create ECR repository if it doesn't exist
         if aws ecr describe-repositories --repository-names ${{ env.ECR_REPOSITORY }} --region ${{ env.AWS_REGION }} 2>/dev/null; then
-          echo "Repository ${{ env.ECR_REPOSITORY }} already exists"
+          echo "✅ ECR repository ${{ env.ECR_REPOSITORY }} already exists"
         else
-          echo "Creating repository ${{ env.ECR_REPOSITORY }} in region ${{ env.AWS_REGION }}"
+          echo "Creating ECR repository ${{ env.ECR_REPOSITORY }}..."
           aws ecr create-repository \
             --repository-name ${{ env.ECR_REPOSITORY }} \
             --region ${{ env.AWS_REGION }} \
             --image-scanning-configuration scanOnPush=true \
             --encryption-configuration encryptionType=AES256
+          echo "✅ Created ECR repository"
         fi
+        
+        # Set ECR repository policy to allow Lambda access
+        echo "Setting up ECR repository policy for Lambda access..."
+        aws ecr set-repository-policy \
+          --repository-name ${{ env.ECR_REPOSITORY }} \
+          --region ${{ env.AWS_REGION }} \
+          --policy-text '{
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "LambdaAccess",
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": "lambda.amazonaws.com"
+                },
+                "Action": [
+                  "ecr:BatchGetImage",
+                  "ecr:GetDownloadUrlForLayer"
+                ]
+              }
+            ]
+          }'
+        echo "✅ ECR repository policy configured"
 
     - name: Build and push Docker image
       id: build
@@ -80,74 +106,90 @@ jobs:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         IMAGE_TAG: ${{ github.sha }}
       run: |
+        echo "=== Building and Pushing Docker Image ==="
         cd coinbase-aws
         docker build -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG .
         docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
         echo "image_uri=$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG" >> $GITHUB_OUTPUT
+        echo "✅ Docker image built and pushed successfully"
 
-    - name: Debug IAM Role Permissions
+    - name: Setup IAM Role and Permissions
       run: |
-        echo "=== Debugging IAM Role Permissions ==="
+        echo "=== Setting up IAM Role and Permissions ==="
+        
+        # Check if IAM role exists
         if aws iam get-role --role-name lambda-execution-role-fintracker-v2 2>/dev/null; then
-          echo "✅ IAM role exists"
-          aws iam list-attached-role-policies --role-name lambda-execution-role-fintracker-v2 || echo "No attached policies"
-          aws iam list-role-policies --role-name lambda-execution-role-fintracker-v2 || echo "No inline policies"
+          echo "✅ IAM role lambda-execution-role-fintracker-v2 exists"
+          
+          # Check if ECR permissions exist in the role
+          if aws iam get-role-policy --role-name lambda-execution-role-fintracker-v2 --policy-name s3-lambda-fintracker-v2 2>/dev/null | grep -q "ecr"; then
+            echo "✅ ECR permissions already exist in role"
+          else
+            echo "Adding ECR permissions to existing role..."
+            aws iam put-role-policy \
+              --role-name lambda-execution-role-fintracker-v2 \
+              --policy-name s3-lambda-fintracker-v2 \
+              --policy-document '{
+                "Version": "2012-10-17",
+                "Statement": [
+                  {
+                    "Effect": "Allow",
+                    "Action": [
+                      "logs:CreateLogGroup",
+                      "logs:CreateLogStream", 
+                      "logs:PutLogEvents"
+                    ],
+                    "Resource": "arn:aws:logs:*:*:*"
+                  },
+                  {
+                    "Effect": "Allow",
+                    "Action": [
+                      "s3:GetObject",
+                      "s3:PutObject",
+                      "s3:PutObjectAcl"
+                    ],
+                    "Resource": "arn:aws:s3:::hashadar-personalfinance/*"
+                  },
+                  {
+                    "Effect": "Allow",
+                    "Action": [
+                      "ecr:GetAuthorizationToken"
+                    ],
+                    "Resource": "*"
+                  },
+                  {
+                    "Effect": "Allow",
+                    "Action": [
+                      "ecr:BatchCheckLayerAvailability",
+                      "ecr:GetDownloadUrlForLayer",
+                      "ecr:BatchGetImage"
+                    ],
+                    "Resource": "arn:aws:ecr:eu-west-2:'${{ secrets.AWS_ACCOUNT_ID }}':repository/coinbase-test-lambda"
+                  }
+                ]
+              }'
+            echo "✅ Added ECR permissions to role"
+          fi
         else
-          echo "❌ IAM role not found - GitHub Actions user needs: iam:GetRole, iam:ListAttachedRolePolicies, iam:ListRolePolicies"
+          echo "❌ IAM role lambda-execution-role-fintracker-v2 does not exist"
+          echo "Please create the role manually with the required permissions"
+          exit 1
         fi
 
-    - name: Debug ECR Access
+    - name: Deploy Lambda Function
       run: |
-        echo "=== Debugging ECR Access ==="
-        aws ecr describe-repositories --repository-names ${{ env.ECR_REPOSITORY }} --region ${{ env.AWS_REGION }}
+        echo "=== Deploying Lambda Function ==="
         
-        if aws ecr describe-images --repository-name ${{ env.ECR_REPOSITORY }} --region ${{ env.AWS_REGION }} --query 'imageDetails[0:3]' --output table 2>/dev/null; then
-          echo "✅ ECR images accessible"
-        else
-          echo "⚠️  Cannot list ECR images (missing ecr:DescribeImages permission)"
-        fi
-        
-        IMAGE_URI="${{ steps.build.outputs.image_uri }}"
-        REPO_NAME=$(echo $IMAGE_URI | cut -d'/' -f2 | cut -d':' -f1)
-        IMAGE_TAG=$(echo $IMAGE_URI | cut -d':' -f2)
-        
-        if aws ecr batch-get-image --repository-name $REPO_NAME --image-ids imageTag=$IMAGE_TAG --region ${{ env.AWS_REGION }} 2>/dev/null; then
-          echo "✅ ECR image access successful"
-        else
-          echo "❌ Failed to access ECR image"
-        fi
-
-    - name: Debug IAM Role ECR Permissions
-      run: |
-        echo "=== Debugging IAM Role ECR Permissions ==="
-        if aws iam get-role --role-name lambda-execution-role-fintracker-v2 2>/dev/null; then
-          echo "Checking ECR permissions in role policies..."
-          aws iam list-attached-role-policies --role-name lambda-execution-role-fintracker-v2 --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null || echo "No attached policies"
-          aws iam list-role-policies --role-name lambda-execution-role-fintracker-v2 --query 'PolicyNames[]' --output text 2>/dev/null || echo "No inline policies"
-        else
-          echo "Cannot check role permissions - role not accessible"
-        fi
-
-    - name: Debug Lambda Function Status
-      run: |
-        echo "=== Debugging Lambda Function Status ==="
-        if aws lambda get-function --function-name ${{ env.LAMBDA_FUNCTION_NAME }} --region ${{ env.AWS_REGION }} 2>/dev/null; then
-          echo "✅ Lambda function exists"
-        else
-          echo "❌ Lambda function does not exist"
-        fi
-
-    - name: Create or update Lambda function
-      run: |
         # Check if function exists
-        if aws lambda get-function --function-name ${{ env.LAMBDA_FUNCTION_NAME }} 2>/dev/null; then
-          # Update existing function
+        if aws lambda get-function --function-name ${{ env.LAMBDA_FUNCTION_NAME }} --region ${{ env.AWS_REGION }} 2>/dev/null; then
+          echo "Updating existing Lambda function..."
           aws lambda update-function-code \
             --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
-            --image-uri ${{ steps.build.outputs.image_uri }}
-          echo "Updated existing Lambda function"
+            --image-uri ${{ steps.build.outputs.image_uri }} \
+            --region ${{ env.AWS_REGION }}
+          echo "✅ Updated existing Lambda function"
         else
-          # Create new function
+          echo "Creating new Lambda function..."
           aws lambda create-function \
             --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
             --package-type Image \
@@ -155,21 +197,35 @@ jobs:
             --role arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/lambda-execution-role-fintracker-v2 \
             --timeout 30 \
             --memory-size 512 \
-            --environment Variables='{ENVIRONMENT=develop}'
-          echo "Created new Lambda function"
+            --environment Variables='{ENVIRONMENT=develop}' \
+            --region ${{ env.AWS_REGION }}
+          echo "✅ Created new Lambda function"
         fi
-    
-    - name: Test Lambda function
+
+    - name: Test Lambda Function
       run: |
-        # Wait a moment for function to be ready
-        sleep 10
+        echo "=== Testing Lambda Function ==="
         
-        # Invoke the function
+        # Wait for function to be ready
+        echo "Waiting for function to be ready..."
+        sleep 15
+        
+        # Test the function
+        echo "Invoking Lambda function..."
         aws lambda invoke \
           --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
           --payload '{"test": "data"}' \
+          --region ${{ env.AWS_REGION }} \
           response.json
         
         # Display response
+        echo "Lambda function response:"
         cat response.json
-        echo "Lambda function test completed successfully" 
+        
+        # Check if the function executed successfully
+        if grep -q '"statusCode": 200' response.json; then
+          echo "✅ Lambda function test completed successfully"
+        else
+          echo "❌ Lambda function test failed"
+          exit 1
+        fi 
