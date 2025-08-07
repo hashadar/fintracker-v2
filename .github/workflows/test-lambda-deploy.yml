@@ -73,6 +73,99 @@ jobs:
             --image-scanning-configuration scanOnPush=true \
             --encryption-configuration encryptionType=AES256
         fi
+
+    - name: Create or update IAM role for Lambda
+      run: |
+        echo "Checking if IAM role lambda-execution-role-fintracker-v2 exists..."
+        if aws iam get-role --role-name lambda-execution-role-fintracker-v2 2>/dev/null; then
+          echo "IAM role lambda-execution-role-fintracker-v2 already exists"
+          
+          # Check if ECR permissions policy exists
+          if aws iam get-role-policy --role-name lambda-execution-role-fintracker-v2 --policy-name ECRPermissions 2>/dev/null; then
+            echo "ECR permissions policy already exists"
+          else
+            echo "Creating ECR permissions policy..."
+            cat > ecr-policy.json << EOF
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecr:GetDownloadUrlForLayer",
+                    "ecr:BatchGetImage",
+                    "ecr:BatchCheckLayerAvailability"
+                  ],
+                  "Resource": "arn:aws:ecr:eu-west-2:${{ secrets.AWS_ACCOUNT_ID }}:repository/coinbase-test-lambda"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecr:GetAuthorizationToken"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+            EOF
+            
+            aws iam put-role-policy \
+              --role-name lambda-execution-role-fintracker-v2 \
+              --policy-name ECRPermissions \
+              --policy-document file://ecr-policy.json
+            echo "ECR permissions policy created"
+          fi
+        else
+          echo "Creating IAM role lambda-execution-role-fintracker-v2..."
+          aws iam create-role \
+            --role-name lambda-execution-role-fintracker-v2 \
+            --assume-role-policy-document '{
+              "Version": "2012-10-17",
+              "Statement": [{
+                "Effect": "Allow",
+                "Principal": {"Service": "lambda.amazonaws.com"},
+                "Action": "sts:AssumeRole"
+              }]
+            }'
+          
+          echo "Attaching basic execution policy..."
+          aws iam attach-role-policy \
+            --role-name lambda-execution-role-fintracker-v2 \
+            --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+          
+          echo "Creating ECR permissions policy..."
+          cat > ecr-policy.json << EOF
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": [
+                  "ecr:GetDownloadUrlForLayer",
+                  "ecr:BatchGetImage",
+                  "ecr:BatchCheckLayerAvailability"
+                ],
+                "Resource": "arn:aws:ecr:eu-west-2:${{ secrets.AWS_ACCOUNT_ID }}:repository/coinbase-test-lambda"
+              },
+              {
+                "Effect": "Allow",
+                "Action": [
+                  "ecr:GetAuthorizationToken"
+                ],
+                "Resource": "*"
+              }
+            ]
+          }
+          EOF
+          
+          aws iam put-role-policy \
+            --role-name lambda-execution-role-fintracker-v2 \
+            --policy-name ECRPermissions \
+            --policy-document file://ecr-policy.json
+          
+          echo "Waiting for role to be available..."
+          sleep 10
+        fi
     
     - name: Build and push Docker image
       id: build
