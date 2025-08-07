@@ -79,7 +79,7 @@ jobs:
         
         # Set ECR repository policy to allow Lambda access
         echo "Setting up ECR repository policy for Lambda access..."
-        aws ecr set-repository-policy \
+        if aws ecr set-repository-policy \
           --repository-name ${{ env.ECR_REPOSITORY }} \
           --region ${{ env.AWS_REGION }} \
           --policy-text '{
@@ -97,8 +97,18 @@ jobs:
                 ]
               }
             ]
-          }'
-        echo "✅ ECR repository policy configured"
+          }' 2>/dev/null; then
+          echo "✅ ECR repository policy configured"
+        else
+          echo "⚠️  Cannot set ECR repository policy - missing ecr:SetRepositoryPolicy permission"
+          echo "You need to add this permission to the github-actions-hasha user:"
+          echo "ecr:SetRepositoryPolicy"
+          echo ""
+          echo "Or manually set the repository policy using:"
+          echo "aws ecr set-repository-policy --repository-name ${{ env.ECR_REPOSITORY }} --region ${{ env.AWS_REGION }} --policy-text '{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"LambdaAccess\",\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"lambda.amazonaws.com\"},\"Action\":[\"ecr:BatchGetImage\",\"ecr:GetDownloadUrlForLayer\"]}]}'"
+          echo ""
+          echo "Continuing with deployment - Lambda may fail if repository policy is not set..."
+        fi
 
     - name: Build and push Docker image
       id: build
