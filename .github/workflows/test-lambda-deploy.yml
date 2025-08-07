@@ -170,14 +170,11 @@ jobs:
         echo "Waiting for function to be ready..."
         sleep 15
         
-        # Create test payload
-        echo '{"test": "data"}' > test-payload.json
-        
         # Test the function
         echo "Invoking Lambda function..."
         aws lambda invoke \
           --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
-          --payload file://test-payload.json \
+          --payload '{"test": "data"}' \
           --region ${{ env.AWS_REGION }} \
           response.json
         
