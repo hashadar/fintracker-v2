@@ -197,21 +197,50 @@ jobs:
     
     - name: Setup EventBridge Rule
       run: |
-        # Check if rule exists
-        if ! aws events describe-rule --name coinbase-daily-extraction-rule --region ${{ env.AWS_REGION }} 2>/dev/null; then
+        echo "Starting EventBridge rule setup..."
+        
+        # Check if rule exists (with better error handling)
+        RULE_EXISTS=false
+        if aws events describe-rule --name coinbase-daily-extraction-rule --region ${{ env.AWS_REGION }} 2>/dev/null; then
+          echo "EventBridge rule 'coinbase-daily-extraction-rule' already exists"
+          RULE_EXISTS=true
+        else
+          echo "EventBridge rule 'coinbase-daily-extraction-rule' does not exist, creating it..."
+        fi
+        
+        if [ "$RULE_EXISTS" = false ]; then
           echo "Creating EventBridge rule for daily execution at 2am UTC..."
           aws events put-rule \
             --name coinbase-daily-extraction-rule \
             --schedule-expression "cron(0 2 * * ? *)" \
             --region ${{ env.AWS_REGION }}
           
-          # Add Lambda as target
-          aws events put-targets \
-            --rule coinbase-daily-extraction-rule \
-            --targets "Id"="1","Arn"="arn:aws:lambda:${{ env.AWS_REGION }}:${{ secrets.AWS_ACCOUNT_ID }}:function:${{ env.LAMBDA_FUNCTION_NAME }}" \
-            --region ${{ env.AWS_REGION }}
-          
-          # Add permission for EventBridge to invoke Lambda
+          if [ $? -eq 0 ]; then
+            echo "✅ EventBridge rule created successfully"
+          else
+            echo "❌ Failed to create EventBridge rule"
+            exit 1
+          fi
+        fi
+        
+        echo "Configuring EventBridge target..."
+        # Add/Update Lambda as target
+        aws events put-targets \
+          --rule coinbase-daily-extraction-rule \
+          --targets "Id"="1","Arn"="arn:aws:lambda:${{ env.AWS_REGION }}:${{ secrets.AWS_ACCOUNT_ID }}:function:${{ env.LAMBDA_FUNCTION_NAME }}" \
+          --region ${{ env.AWS_REGION }}
+        
+        if [ $? -eq 0 ]; then
+          echo "✅ EventBridge target configured successfully"
+        else
+          echo "❌ Failed to configure EventBridge target"
+          exit 1
+        fi
+        
+        echo "Checking EventBridge permissions..."
+        # Check if permission exists, if not add it
+        if ! aws lambda get-policy --function-name ${{ env.LAMBDA_FUNCTION_NAME }} --region ${{ env.AWS_REGION }} 2>/dev/null | grep -q "EventBridgeInvoke"; then
+          echo "Adding EventBridge permission..."
           aws lambda add-permission \
             --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
             --statement-id EventBridgeInvoke \
@@ -219,6 +248,15 @@ jobs:
             --principal events.amazonaws.com \
             --source-arn "arn:aws:events:${{ env.AWS_REGION }}:${{ secrets.AWS_ACCOUNT_ID }}:rule/coinbase-daily-extraction-rule" \
             --region ${{ env.AWS_REGION }}
+          
+          if [ $? -eq 0 ]; then
+            echo "✅ EventBridge permission added successfully"
+          else
+            echo "❌ Failed to add EventBridge permission"
+            exit 1
+          fi
         else
-          echo "EventBridge rule already exists"
-        fi 
+          echo "✅ EventBridge permission already exists"
+        fi
+        
+        echo "🎉 EventBridge rule setup completed successfully!" 
