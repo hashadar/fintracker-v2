@@ -62,8 +62,17 @@ jobs:
     
     - name: Create ECR repository if it doesn't exist
       run: |
-        aws ecr describe-repositories --repository-names ${{ env.ECR_REPOSITORY }} || \
-        aws ecr create-repository --repository-name ${{ env.ECR_REPOSITORY }}
+        echo "Checking if ECR repository ${{ env.ECR_REPOSITORY }} exists..."
+        if aws ecr describe-repositories --repository-names ${{ env.ECR_REPOSITORY }} --region ${{ env.AWS_REGION }} 2>/dev/null; then
+          echo "Repository ${{ env.ECR_REPOSITORY }} already exists"
+        else
+          echo "Creating repository ${{ env.ECR_REPOSITORY }} in region ${{ env.AWS_REGION }}"
+          aws ecr create-repository \
+            --repository-name ${{ env.ECR_REPOSITORY }} \
+            --region ${{ env.AWS_REGION }} \
+            --image-scanning-configuration scanOnPush=true \
+            --encryption-configuration encryptionType=AES256
+        fi
     
     - name: Build and push Docker image
       id: build
