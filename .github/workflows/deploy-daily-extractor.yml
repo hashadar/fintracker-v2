@@ -130,12 +130,22 @@ jobs:
             --image-uri ${{ steps.build.outputs.image_uri }} \
             --region ${{ env.AWS_REGION }}
           
+          # Wait for function code update to complete
+          echo "Waiting for function code update to complete..."
+          aws lambda wait function-updated --function-name ${{ env.LAMBDA_FUNCTION_NAME }} --region ${{ env.AWS_REGION }}
+          
+          # Now update function configuration
+          echo "Updating function configuration..."
           aws lambda update-function-configuration \
             --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
             --timeout ${{ env.LAMBDA_TIMEOUT }} \
             --memory-size ${{ env.LAMBDA_MEMORY }} \
             --region ${{ env.AWS_REGION }} \
             --environment Variables='{ENVIRONMENT=${{ steps.set-env.outputs.environment }},S3_BUCKET_NAME=hashadar-personalfinance}'
+          
+          # Wait for configuration update to complete
+          echo "Waiting for function configuration update to complete..."
+          aws lambda wait function-updated --function-name ${{ env.LAMBDA_FUNCTION_NAME }} --region ${{ env.AWS_REGION }}
         else
           echo "Creating new Lambda function..."
           aws lambda create-function \
@@ -147,13 +157,16 @@ jobs:
             --memory-size ${{ env.LAMBDA_MEMORY }} \
             --region ${{ env.AWS_REGION }} \
             --environment Variables='{ENVIRONMENT=${{ steps.set-env.outputs.environment }},S3_BUCKET_NAME=hashadar-personalfinance}'
+          
+          # Wait for function creation to complete
+          echo "Waiting for function creation to complete..."
+          aws lambda wait function-active --function-name ${{ env.LAMBDA_FUNCTION_NAME }} --region ${{ env.AWS_REGION }}
         fi
     
     - name: Test Lambda Function
       run: |
-        # Wait for function to be ready
-        echo "Waiting for function to be ready..."
-        aws lambda wait function-updated --function-name ${{ env.LAMBDA_FUNCTION_NAME }} --region ${{ env.AWS_REGION }}
+        # Function should already be ready from previous step
+        echo "Testing Lambda function..."
         
         # Create test payload
         echo '{"test": "data"}' | base64 > test-payload.b64
